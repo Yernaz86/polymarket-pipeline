@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import time
+import logging
 
 import config
 import logger
 from edge import Signal
 from markets import get_token_id
+
+log = logging.getLogger(__name__)
 
 
 def execute_trade(signal: Signal) -> dict:
@@ -57,12 +61,56 @@ def _execute_live(signal: Signal) -> dict:
         resp = client.post_order(signed_order, OrderType.GTC)
 
         order_id = resp.get("orderID", resp.get("id", "unknown"))
-        return _log_and_return(signal, status="executed", order_id=order_id)
+
+        # Poll for fill confirmation (up to 30s)
+        fill_status = _poll_order_status(order_id, client, max_wait_s=30)
+        status = f"executed_{fill_status}"
+
+        return _log_and_return(signal, status=status, order_id=order_id)
 
     except ImportError:
         return _log_and_return(signal, status="error_no_clob_client", order_id=None)
     except Exception as e:
         return _log_and_return(signal, status=f"error_{type(e).__name__}", order_id=None)
+
+
+def _poll_order_status(order_id: str, client, max_wait_s: int = 30) -> str:
+    """
+    Poll the CLOB API to check fill status after order placement.
+    Returns: 'filled', 'partial', 'cancelled', or 'pending' (timeout).
+    """
+    deadline = time.time() + max_wait_s
+    poll_interval = 3
+
+    while time.time() < deadline:
+        try:
+            resp = client.get_order(order_id)
+            status = (resp.get("status") or "").upper()
+            size_matched = float(resp.get("sizeMatched", 0) or 0)
+            size_filled = float(resp.get("sizeFilled", size_matched) or 0)
+            original_size = float(resp.get("originalSize", resp.get("size", 0)) or 1)
+
+            if status in ("MATCHED", "FILLED"):
+                log.info(f"[executor] Order {order_id} filled (${size_filled:.2f})")
+                return "filled"
+
+            if status in ("CANCELLED", "CANCELED"):
+                log.warning(f"[executor] Order {order_id} cancelled by exchange")
+                return "cancelled"
+
+            # Partially filled and no longer active
+            if status == "UNMATCHED" and size_filled > 0:
+                fill_pct = size_filled / max(original_size, 0.01)
+                log.info(f"[executor] Order {order_id} partial fill ({fill_pct:.0%})")
+                return "partial"
+
+        except Exception as e:
+            log.warning(f"[executor] Status poll error for {order_id}: {e}")
+
+        time.sleep(poll_interval)
+
+    log.warning(f"[executor] Order {order_id} status unknown after {max_wait_s}s (still open)")
+    return "pending"
 
 
 def _log_and_return(signal: Signal, status: str, order_id: str | None) -> dict:

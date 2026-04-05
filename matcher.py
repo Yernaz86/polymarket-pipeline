@@ -1,31 +1,82 @@
 """
 News-to-market matching — routes breaking news to relevant active markets.
-Two strategies: fast keyword matching + semantic Claude matching for ambiguous cases.
+Two strategies: fast weighted TF-IDF matching + category fallback.
 """
 from __future__ import annotations
 
 import logging
+import math
+from collections import Counter
 from markets import Market
 
 log = logging.getLogger(__name__)
 
+STOPWORDS = {
+    "will", "the", "a", "an", "be", "by", "in", "on", "at", "to", "of",
+    "for", "is", "it", "this", "that", "and", "or", "not", "before",
+    "after", "end", "yes", "no", "any", "has", "have", "does", "do",
+    "than", "more", "less", "over", "under", "above", "below", "through",
+    "during", "between", "reach", "exceed", "with", "from", "are", "was",
+    "been", "would", "could", "should", "may", "might", "its", "their",
+    "there", "then", "when", "which", "what", "who", "how", "new", "said",
+}
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase, strip punctuation, remove stopwords, min length 3."""
+    words = text.lower().split()
+    return [
+        w.strip("?.,!\"'()[]:-")
+        for w in words
+        if w.strip("?.,!\"'()[]:-") not in STOPWORDS
+        and len(w.strip("?.,!\"'()[]:-")) >= 3
+    ]
+
+
+def _bigrams(tokens: list[str]) -> list[str]:
+    """Generate adjacent word pairs: ['fed rate', 'rate cut', ...]"""
+    return [f"{tokens[i]} {tokens[i+1]}" for i in range(len(tokens) - 1)]
+
+
+def _idf_weight(token: str) -> float:
+    """
+    Approximate IDF by token length — longer/rarer words score higher.
+    Short common words (3-4 chars) get low weight even if not in stopwords.
+    Bigrams always get a boost.
+    """
+    if " " in token:  # bigram
+        return 2.5
+    length = len(token)
+    if length <= 4:
+        return 0.5
+    if length <= 6:
+        return 1.0
+    if length <= 9:
+        return 1.5
+    return 2.0
+
+
+def _score_similarity(headline_tokens: set[str], market_tokens: list[str]) -> float:
+    """
+    Compute weighted overlap score between headline tokens and market tokens.
+    Returns a score in [0, 1] range (normalized by market token weights).
+    """
+    if not market_tokens:
+        return 0.0
+
+    total_weight = sum(_idf_weight(t) for t in market_tokens)
+    if total_weight == 0:
+        return 0.0
+
+    matched_weight = sum(
+        _idf_weight(t) for t in market_tokens if t in headline_tokens
+    )
+    return matched_weight / total_weight
+
 
 def extract_keywords(question: str) -> list[str]:
-    """Extract meaningful keywords from a market question."""
-    stopwords = {
-        "will", "the", "a", "an", "be", "by", "in", "on", "at", "to",
-        "of", "for", "is", "it", "this", "that", "and", "or", "not",
-        "before", "after", "end", "yes", "no", "any", "has", "have",
-        "does", "do", "than", "more", "less", "over", "under", "above",
-        "below", "through", "during", "between", "reach", "exceed",
-    }
-    words = question.lower().split()
-    keywords = [
-        w.strip("?.,!\"'()[]")
-        for w in words
-        if w.strip("?.,!\"'()[]") not in stopwords and len(w.strip("?.,!\"'()[]")) > 2
-    ]
-    return keywords
+    """Extract meaningful keywords from a market question (public API, kept for compatibility)."""
+    return _tokenize(question)
 
 
 def match_news_to_markets(
@@ -35,26 +86,27 @@ def match_news_to_markets(
 ) -> list[Market]:
     """
     Find markets that a news headline is relevant to.
-    Uses keyword overlap scoring — fast, no API call.
+    Uses weighted TF-IDF scoring with bigram support — fast, no API call.
+    Requires at least one meaningful keyword hit to qualify.
     """
-    headline_lower = headline.lower()
+    h_tokens = _tokenize(headline)
+    h_bigrams = _bigrams(h_tokens)
+    headline_set = set(h_tokens) | set(h_bigrams)
+
     scored = []
-
     for market in markets:
-        keywords = extract_keywords(market.question)
-        if not keywords:
+        q_tokens = _tokenize(market.question)
+        q_bigrams = _bigrams(q_tokens)
+        all_market_tokens = q_tokens + q_bigrams
+
+        # Require at least one direct token hit (avoids noisy category-only matches)
+        if not any(t in headline_set for t in all_market_tokens):
             continue
 
-        # Count keyword hits
-        hits = sum(1 for kw in keywords if kw in headline_lower)
-        if hits == 0:
-            continue
+        score = _score_similarity(headline_set, all_market_tokens)
+        if score > 0:
+            scored.append((score, market))
 
-        # Score = hits / total keywords (relevance ratio)
-        score = hits / len(keywords)
-        scored.append((score, market))
-
-    # Sort by score descending
     scored.sort(key=lambda x: x[0], reverse=True)
     return [m for _, m in scored[:max_matches]]
 

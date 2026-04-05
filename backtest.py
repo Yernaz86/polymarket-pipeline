@@ -1,18 +1,19 @@
 """
 Backtest engine — validate the V2 strategy against historical data.
-Replays resolved markets with their news coverage through the classifier.
+Replays resolved markets with real news coverage through the classifier.
 """
 from __future__ import annotations
 
 import time
 import logging
+import urllib.parse
 from dataclasses import dataclass
 
 import httpx
+import feedparser
 
 from rich.console import Console
 from rich.table import Table
-from rich.panel import Panel
 
 import config
 from markets import Market
@@ -48,6 +49,70 @@ class BacktestReport:
     win_rate: float
     avg_edge: float
     results: list[BacktestResult]
+
+
+def _extract_search_query(question: str) -> str:
+    """Extract a concise search query from a market question."""
+    stopwords = {
+        "will", "the", "a", "an", "be", "by", "in", "on", "at", "to", "of",
+        "for", "is", "it", "this", "that", "and", "or", "not", "before",
+        "after", "end", "yes", "no", "any", "has", "have", "does", "do",
+        "than", "more", "less", "over", "under", "above", "below", "reach",
+        "exceed", "happen", "occur", "least", "most", "first", "last", "2025",
+        "2026", "2024", "january", "february", "march", "april", "may", "june",
+        "july", "august", "september", "october", "november", "december",
+    }
+    words = question.split()
+    keywords = [
+        w.strip("?.,!\"'()[]")
+        for w in words
+        if w.strip("?.,!\"'()[]").lower() not in stopwords
+        and len(w.strip("?.,!\"'()[]")) > 3
+    ]
+    return " ".join(keywords[:6])
+
+
+def fetch_real_news_for_market(question: str, newsapi_key: str = "") -> list[str]:
+    """
+    Fetch real news headlines related to a market question.
+    Uses NewsAPI if key is provided, otherwise falls back to Google News RSS.
+    Returns up to 5 real headlines.
+    """
+    query = _extract_search_query(question)
+    if not query:
+        return []
+
+    # Try NewsAPI first (requires key)
+    if newsapi_key:
+        try:
+            resp = httpx.get(
+                "https://newsapi.org/v2/everything",
+                params={
+                    "q": query,
+                    "language": "en",
+                    "sortBy": "relevancy",
+                    "pageSize": 5,
+                    "apiKey": newsapi_key,
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            articles = resp.json().get("articles", [])
+            headlines = [a["title"] for a in articles if a.get("title")]
+            if headlines:
+                return headlines[:5]
+        except Exception:
+            pass  # fall through to RSS
+
+    # Fallback: Google News RSS (no API key required)
+    try:
+        encoded_query = urllib.parse.quote(query)
+        url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
+        feed = feedparser.parse(url)
+        headlines = [entry.title for entry in feed.entries[:5] if entry.get("title")]
+        return headlines
+    except Exception:
+        return []
 
 
 def fetch_resolved_markets(limit: int = 50, category: str | None = None) -> list[dict]:
@@ -113,8 +178,9 @@ def run_backtest(
     test_headlines: list[str] | None = None,
 ) -> BacktestReport:
     """
-    Run a backtest against resolved markets.
-    Uses mock headlines derived from market questions if none provided.
+    Run a backtest against resolved markets using real news headlines.
+    Fetches actual Google News headlines for each market question.
+    Falls back to NewsAPI if NEWSAPI_KEY is configured.
     """
     console.print("[bold]Fetching resolved niche markets...[/bold]")
     resolved = fetch_resolved_markets(limit=limit, category=category)
@@ -132,6 +198,7 @@ def run_backtest(
             results=[],
         )
 
+    newsapi_key = config.NEWSAPI_KEY
     results = []
     signals = 0
     total_pnl = 0.0
@@ -140,8 +207,8 @@ def run_backtest(
         question = m_data["question"]
         resolved_price = m_data["resolved_yes_price"]
 
-        # Create a Market object for the classifier
-        entry_price = 0.5  # assume we entered at midpoint (conservative)
+        # Entry price: use mid-point as conservative assumption
+        entry_price = 0.5
         market = Market(
             condition_id=m_data["condition_id"],
             question=question,
@@ -154,16 +221,35 @@ def run_backtest(
             tokens=[],
         )
 
-        # Generate a synthetic headline from the question
-        # In production, you'd replay actual historical news
-        headline = f"Breaking: Developments suggest '{question}' outcome shifting"
+        # Use caller-supplied headlines OR fetch real ones from Google News / NewsAPI
         if test_headlines and i < len(test_headlines):
-            headline = test_headlines[i]
+            headlines_for_market = [test_headlines[i]]
+        else:
+            console.print(f"  [{i + 1}/{len(resolved)}] Fetching news for: {question[:55]}...", end="\r")
+            headlines_for_market = fetch_real_news_for_market(question, newsapi_key)
+
+        if not headlines_for_market:
+            # No news found — skip this market (can't make a real classification)
+            continue
+
+        # Classify each headline; take the strongest non-neutral signal
+        best_cls = None
+        best_headline = ""
+        for headline in headlines_for_market:
+            cls = classify(headline, market, source="backtest")
+            if cls.direction == "neutral":
+                continue
+            if best_cls is None or cls.materiality > best_cls.materiality:
+                best_cls = cls
+                best_headline = headline
+
+        if best_cls is None:
+            continue  # all headlines neutral
+
+        cls = best_cls
+        headline = best_headline
 
         console.print(f"  [{i + 1}/{len(resolved)}] {question[:60]}...", end="\r")
-
-        # Classify
-        cls = classify(headline, market, source="backtest")
 
         if cls.direction == "neutral" or cls.materiality < config.MATERIALITY_THRESHOLD:
             continue
