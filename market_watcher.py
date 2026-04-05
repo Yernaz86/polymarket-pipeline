@@ -116,16 +116,40 @@ class MarketWatcher:
                         try:
                             msg = await asyncio.wait_for(ws.recv(), timeout=10)
                             self.stats["ws_messages"] += 1
-                            data = json.loads(msg)
-                            self._handle_ws_message(data)
+
+                            # Skip empty/keepalive frames
+                            if not msg or (isinstance(msg, str) and not msg.strip()):
+                                continue
+                            if isinstance(msg, bytes):
+                                try:
+                                    msg = msg.decode("utf-8")
+                                except UnicodeDecodeError:
+                                    continue
+                            if msg.strip() in ("PING", "PONG", "ping", "pong"):
+                                continue
+
+                            try:
+                                data = json.loads(msg)
+                            except json.JSONDecodeError:
+                                continue  # non-JSON frame, ignore silently
+
+                            # Server may batch updates as a list
+                            if isinstance(data, list):
+                                for item in data:
+                                    if isinstance(item, dict):
+                                        self._handle_ws_message(item)
+                            elif isinstance(data, dict):
+                                self._handle_ws_message(data)
                         except asyncio.TimeoutError:
-                            # Send ping
-                            await ws.ping()
+                            try:
+                                await ws.ping()
+                            except Exception:
+                                break  # connection dead, reconnect
 
             except Exception as e:
                 self._ws_connected = False
-                log.warning(f"[watcher] WebSocket error: {e}, reconnecting in 5s")
-                await asyncio.sleep(5)
+                log.warning(f"[watcher] WebSocket disconnected ({type(e).__name__}), using polling fallback. Reconnecting in 30s")
+                await asyncio.sleep(30)
 
     def _handle_ws_message(self, data: dict):
         """Process a WebSocket price update."""
