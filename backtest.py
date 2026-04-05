@@ -116,16 +116,25 @@ def fetch_real_news_for_market(question: str, newsapi_key: str = "") -> list[str
 
 
 def fetch_resolved_markets(limit: int = 50, category: str | None = None) -> list[dict]:
-    """Fetch recently resolved markets from Gamma API."""
-    params = {
-        "limit": limit,
-        "closed": True,
-        "order": "volume",
-        "ascending": False,
-    }
+    """
+    Fetch recently resolved niche markets from Gamma API.
+    Always pulls a large batch from the API (500) so the volume filter
+    has enough candidates — then trims to `limit` results.
+    Ordering by volume ascending surfaces smaller niche markets first.
+    """
+    import json as _json
 
     try:
-        resp = httpx.get(f"{GAMMA_API}/markets", params=params, timeout=15)
+        resp = httpx.get(
+            f"{GAMMA_API}/markets",
+            params={
+                "limit": 500,        # fetch wide; filter narrows it down
+                "closed": True,
+                "order": "volume",
+                "ascending": True,   # small markets first → more niche hits
+            },
+            timeout=20,
+        )
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
@@ -137,10 +146,9 @@ def fetch_resolved_markets(limit: int = 50, category: str | None = None) -> list
     markets = []
     for m in items:
         try:
-            import json
             outcome_prices = m.get("outcomePrices", "")
             if isinstance(outcome_prices, str):
-                prices = json.loads(outcome_prices)
+                prices = _json.loads(outcome_prices)
             else:
                 prices = outcome_prices
 
@@ -152,6 +160,9 @@ def fetch_resolved_markets(limit: int = 50, category: str | None = None) -> list
                 continue
 
             question = m.get("question", "")
+            if not question:
+                continue
+
             if category:
                 from markets import _infer_category
                 cat = _infer_category(question, m.get("tags") or [])
@@ -161,11 +172,15 @@ def fetch_resolved_markets(limit: int = 50, category: str | None = None) -> list
             markets.append({
                 "question": question,
                 "condition_id": m.get("conditionId", m.get("condition_id", "")),
-                "yes_price_at_open": 0.5,  # approximation
+                "yes_price_at_open": 0.5,
                 "resolved_yes_price": float(prices[0]),
                 "volume": vol,
                 "category": m.get("tags", []),
             })
+
+            if len(markets) >= limit:
+                break
+
         except (ValueError, TypeError, KeyError):
             continue
 
