@@ -122,6 +122,12 @@ def fetch_resolved_markets(limit: int = 50, category: str | None = None) -> list
     ordering) so the local $1K–$500K filter has enough candidates.
     """
     import json as _json
+    from datetime import datetime, timezone, timedelta
+
+    # Only use markets resolved in the last 60 days so Google News can
+    # find relevant headlines (older markets get unrelated current news).
+    cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+    cutoff_str = cutoff.strftime("%Y-%m-%d")
 
     items: list[dict] = []
     page_size = 500
@@ -132,8 +138,9 @@ def fetch_resolved_markets(limit: int = 50, category: str | None = None) -> list
                 params={
                     "limit": page_size,
                     "offset": offset,
-                    "active": "false",   # resolved/closed markets
+                    "active": "false",
                     "closed": "true",
+                    "end_date_min": cutoff_str,   # recently resolved only
                 },
                 timeout=20,
             )
@@ -146,7 +153,15 @@ def fetch_resolved_markets(limit: int = 50, category: str | None = None) -> list
         page = data if isinstance(data, list) else data.get("data", [])
         if not page:
             break
-        items.extend(page)
+
+        # Client-side date guard in case the API ignores end_date_min
+        filtered_page = []
+        for m in page:
+            end_date = m.get("endDate") or m.get("end_date_iso") or ""
+            if end_date[:10] >= cutoff_str:
+                filtered_page.append(m)
+
+        items.extend(filtered_page)
         if len(page) < page_size:
             break  # last page
 
