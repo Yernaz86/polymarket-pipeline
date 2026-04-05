@@ -126,10 +126,8 @@ class PipelineV2:
             result = await execute_trade_async(signal)
             self.stats["trades_executed"] += 1
 
-            status_color = "bright_green" if (
-                result["status"] in ("dry_run", "executed")
-                or result["status"].startswith("executed_")
-            ) else "red"
+            _SUCCESS = {"dry_run", "executed", "executed_filled", "executed_partial"}
+            status_color = "bright_green" if result["status"] in _SUCCESS else "red"
             console.print(
                 f"  [{status_color}]{result['status']}[/{status_color}] "
                 f"{result['side']} ${result['amount']:.2f} "
@@ -235,10 +233,8 @@ def run_pipeline(
         for signal in signals:
             result = execute_trade(signal)
             results.append(result)
-            status_color = "green" if (
-                result["status"] in ("dry_run", "executed")
-                or result["status"].startswith("executed_")
-            ) else "red"
+            _SUCCESS = {"dry_run", "executed", "executed_filled", "executed_partial"}
+            status_color = "green" if result["status"] in _SUCCESS else "red"
             console.print(f"   [{status_color}]{result['status']}[/{status_color}] {result['market'][:60]} | {result['side']} ${result['amount']}")
     else:
         console.print("\n[bold]4. No signals — nothing to execute.[/bold]")

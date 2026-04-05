@@ -62,11 +62,11 @@ def _execute_live(signal: Signal) -> dict:
 
         order_id = resp.get("orderID", resp.get("id", "unknown"))
 
-        # Poll for fill confirmation (up to 30s)
-        fill_status = _poll_order_status(order_id, client, max_wait_s=30)
+        # Poll for fill confirmation (up to 30s); capture actual filled amount
+        fill_status, filled_usd = _poll_order_status(order_id, client, max_wait_s=30)
         status = f"executed_{fill_status}"
 
-        return _log_and_return(signal, status=status, order_id=order_id)
+        return _log_and_return(signal, status=status, order_id=order_id, filled_usd=filled_usd)
 
     except ImportError:
         return _log_and_return(signal, status="error_no_clob_client", order_id=None)
@@ -74,10 +74,13 @@ def _execute_live(signal: Signal) -> dict:
         return _log_and_return(signal, status=f"error_{type(e).__name__}", order_id=None)
 
 
-def _poll_order_status(order_id: str, client, max_wait_s: int = 30) -> str:
+def _poll_order_status(order_id: str, client, max_wait_s: int = 30) -> tuple[str, float]:
     """
     Poll the CLOB API to check fill status after order placement.
-    Returns: 'filled', 'partial', 'cancelled', or 'pending' (timeout).
+
+    Returns (status, filled_usd) where:
+    - status:     'filled' | 'partial' | 'cancelled' | 'pending'
+    - filled_usd: actual dollar amount matched (0.0 for cancelled/pending)
     """
     deadline = time.time() + max_wait_s
     poll_interval = 3
@@ -92,17 +95,17 @@ def _poll_order_status(order_id: str, client, max_wait_s: int = 30) -> str:
 
             if status in ("MATCHED", "FILLED"):
                 log.info(f"[executor] Order {order_id} filled (${size_filled:.2f})")
-                return "filled"
+                return "filled", size_filled
 
             if status in ("CANCELLED", "CANCELED"):
                 log.warning(f"[executor] Order {order_id} cancelled by exchange")
-                return "cancelled"
+                return "cancelled", 0.0
 
             # Partially filled and no longer active
             if status == "UNMATCHED" and size_filled > 0:
                 fill_pct = size_filled / max(original_size, 0.01)
-                log.info(f"[executor] Order {order_id} partial fill ({fill_pct:.0%})")
-                return "partial"
+                log.info(f"[executor] Order {order_id} partial fill ({fill_pct:.0%}, ${size_filled:.2f})")
+                return "partial", size_filled
 
         except Exception as e:
             log.warning(f"[executor] Status poll error for {order_id}: {e}")
@@ -110,10 +113,15 @@ def _poll_order_status(order_id: str, client, max_wait_s: int = 30) -> str:
         time.sleep(poll_interval)
 
     log.warning(f"[executor] Order {order_id} status unknown after {max_wait_s}s (still open)")
-    return "pending"
+    return "pending", 0.0
 
 
-def _log_and_return(signal: Signal, status: str, order_id: str | None) -> dict:
+def _log_and_return(
+    signal: Signal,
+    status: str,
+    order_id: str | None,
+    filled_usd: float | None = None,
+) -> dict:
     """Log trade to SQLite and return result dict."""
     trade_id = logger.log_trade(
         market_id=signal.market.condition_id,
@@ -133,6 +141,7 @@ def _log_and_return(signal: Signal, status: str, order_id: str | None) -> dict:
         news_latency_ms=signal.news_latency_ms,
         classification_latency_ms=signal.classification_latency_ms,
         total_latency_ms=signal.total_latency_ms,
+        filled_usd=filled_usd,
     )
 
     return {

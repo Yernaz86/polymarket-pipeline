@@ -99,6 +99,7 @@ def _migrate_v2_columns(conn):
         ("news_latency_ms", "INTEGER"),
         ("classification_latency_ms", "INTEGER"),
         ("total_latency_ms", "INTEGER"),
+        ("filled_usd", "REAL"),  # actual fill amount for partial/full fills; NULL = unknown
     ]
     for col_name, col_type in new_cols:
         if col_name not in columns:
@@ -124,6 +125,7 @@ def log_trade(
     news_latency_ms: int | None = None,
     classification_latency_ms: int | None = None,
     total_latency_ms: int | None = None,
+    filled_usd: float | None = None,
 ) -> int:
     conn = _conn()
     cur = conn.execute(
@@ -131,12 +133,14 @@ def log_trade(
            (market_id, market_question, claude_score, market_price, edge,
             side, amount_usd, order_id, status, reasoning, headlines,
             news_source, classification, materiality,
-            news_latency_ms, classification_latency_ms, total_latency_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            news_latency_ms, classification_latency_ms, total_latency_ms,
+            filled_usd)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (market_id, market_question, claude_score, market_price, edge,
          side, amount_usd, order_id, status, reasoning, headlines,
          news_source, classification, materiality,
-         news_latency_ms, classification_latency_ms, total_latency_ms),
+         news_latency_ms, classification_latency_ms, total_latency_ms,
+         filled_usd),
     )
     trade_id = cur.lastrowid
     conn.commit()
@@ -217,18 +221,30 @@ def log_run_end(run_id: int, markets_scanned: int, signals_found: int, trades_pl
 def get_daily_pnl() -> float:
     """
     Return total USD spent on live orders today (negative = loss exposure).
-    Matches 'filled', 'executed', and all 'executed_*' statuses from the
-    order-polling flow (executed_filled, executed_partial, executed_pending).
-    Excludes dry_run, rejected_*, and error_* statuses.
+
+    Per-status accounting:
+    - 'filled' / 'executed' / 'executed_filled': count full amount_usd
+    - 'executed_partial': count filled_usd (actual fill); falls back to
+      amount_usd if filled_usd was not recorded (conservative)
+    - 'executed_cancelled': count 0 (order did not fill, no capital deployed)
+    - 'executed_pending': count full amount_usd (pessimistic; order may still fill)
+    - dry_run / rejected_* / error_*: count 0
     """
     conn = _conn()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     row = conn.execute(
         """SELECT COALESCE(SUM(
-               CASE WHEN status = 'filled'
-                      OR status = 'executed'
-                      OR status LIKE 'executed_%'
-                    THEN -amount_usd ELSE 0 END
+               CASE
+                 WHEN status IN ('filled', 'executed', 'executed_filled')
+                   THEN -amount_usd
+                 WHEN status = 'executed_partial'
+                   THEN -COALESCE(filled_usd, amount_usd)
+                 WHEN status = 'executed_pending'
+                   THEN -amount_usd
+                 WHEN status = 'executed_cancelled'
+                   THEN 0
+                 ELSE 0
+               END
            ), 0) as spent
            FROM trades WHERE created_at LIKE ?""",
         (f"{today}%",),

@@ -196,6 +196,12 @@ def run_backtest(
     directional signals on real text. It is NOT a reliable estimate of
     live trading win rate or expected return.
     """
+    console.print(
+        "[bold yellow]⚠  HEADLINE SANITY CHECK — NOT A TRUE BACKTEST[/bold yellow]\n"
+        "   News is fetched today without date anchoring → look-ahead bias.\n"
+        "   Markets without findable news are skipped → selection bias.\n"
+        "   Win rate shown here is NOT a reliable trading signal.\n"
+    )
     console.print("[bold]Fetching resolved niche markets...[/bold]")
     resolved = fetch_resolved_markets(limit=limit, category=category)
     console.print(f"Found {len(resolved)} resolved niche markets")
