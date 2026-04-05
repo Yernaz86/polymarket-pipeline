@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Polymarket Pipeline</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>
+    body { background: #0f1117; color: #e2e8f0; font-family: 'Courier New', monospace; }
+    .card { background: #1a1d27; border: 1px solid #2d3148; border-radius: 8px; }
+    .tag-ai       { background: #1e3a5f; color: #60a5fa; }
+    .tag-crypto   { background: #1a3a2a; color: #34d399; }
+    .tag-politics { background: #3a1a2a; color: #f472b6; }
+    .tag-technology { background: #2a1a3a; color: #a78bfa; }
+    .tag-science  { background: #3a2a1a; color: #fb923c; }
+    .tag-other    { background: #2a2a2a; color: #94a3b8; }
+    .blink { animation: blink 1.4s infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #1a1d27; }
+    ::-webkit-scrollbar-thumb { background: #3d4266; border-radius: 2px; }
+    table { border-collapse: collapse; width: 100%; }
+    th { color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; padding: 8px 12px; text-align: left; border-bottom: 1px solid #2d3148; }
+    td { padding: 8px 12px; border-bottom: 1px solid #1e2235; font-size: 13px; }
+    tr:hover td { background: #1e2235; }
+  </style>
+</head>
+<body class="min-h-screen p-4">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-6">
+    <div class="flex items-center gap-3">
+      <div class="w-2 h-2 rounded-full bg-green-400 blink" id="statusDot"></div>
+      <span class="text-lg font-bold text-white">POLYMARKET PIPELINE</span>
+      <span id="modeTag" class="text-xs px-2 py-0.5 rounded border border-yellow-500 text-yellow-400">DRY RUN</span>
+    </div>
+    <div class="flex items-center gap-4 text-sm text-slate-400">
+      <span>Auto-refresh: <span class="text-green-400">10s</span></span>
+      <span id="lastUpdate">–</span>
+    </div>
+  </div>
+
+  <!-- Stat Cards -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+    <div class="card p-4">
+      <div class="text-xs text-slate-500 mb-1">TOTAL SIGNALS</div>
+      <div class="text-2xl font-bold text-white" id="totalSignals">–</div>
+    </div>
+    <div class="card p-4">
+      <div class="text-xs text-slate-500 mb-1">DAILY P&L</div>
+      <div class="text-2xl font-bold" id="dailyPnl">–</div>
+    </div>
+    <div class="card p-4">
+      <div class="text-xs text-slate-500 mb-1">ACCURACY</div>
+      <div class="text-2xl font-bold" id="accuracy">–</div>
+    </div>
+    <div class="card p-4">
+      <div class="text-xs text-slate-500 mb-1">AVG LATENCY</div>
+      <div class="text-2xl font-bold text-slate-300" id="latency">–</div>
+    </div>
+  </div>
+
+  <!-- Main Grid -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+    <!-- Trade Log (2/3 width) -->
+    <div class="lg:col-span-2 card p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-sm font-bold text-slate-300">TRADE LOG</h2>
+        <span class="text-xs text-slate-500" id="tradeCount">0 trades</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table id="tradeTable">
+          <thead>
+            <tr>
+              <th>Market</th>
+              <th>Signal</th>
+              <th>Side</th>
+              <th>Bet</th>
+              <th>Edge</th>
+              <th>Status</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody id="tradeBody">
+            <tr><td colspan="7" class="text-center text-slate-500 py-8">No trades yet — run: python cli.py watch</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Right column -->
+    <div class="flex flex-col gap-4">
+
+      <!-- Accuracy breakdown -->
+      <div class="card p-4">
+        <h2 class="text-sm font-bold text-slate-300 mb-3">ACCURACY BY SOURCE</h2>
+        <div id="accuracyBreakdown" class="text-slate-500 text-sm">No resolved trades yet</div>
+      </div>
+
+      <!-- News feed -->
+      <div class="card p-4 flex-1">
+        <h2 class="text-sm font-bold text-slate-300 mb-3">NEWS FEED</h2>
+        <div id="newsFeed" class="space-y-2 max-h-64 overflow-y-auto">
+          <div class="text-slate-500 text-sm">No news yet</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Niche Markets -->
+  <div class="card p-4 mt-4">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-sm font-bold text-slate-300">NICHE MARKETS</h2>
+      <span class="text-xs text-slate-500" id="marketCount">loading…</span>
+    </div>
+    <div class="overflow-x-auto">
+      <table id="marketsTable">
+        <thead>
+          <tr>
+            <th>Category</th>
+            <th>Market Question</th>
+            <th>YES</th>
+            <th>NO</th>
+            <th>Volume</th>
+          </tr>
+        </thead>
+        <tbody id="marketsBody">
+          <tr><td colspan="5" class="text-center text-slate-500 py-4">Loading markets…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+const API = '';
+
+function fmt(n, prefix='$') {
+  if (n == null) return '–';
+  return (n >= 0 ? prefix : '-'+prefix) + Math.abs(n).toFixed(2);
+}
+function fmtVol(n) {
+  if (n >= 1000000) return '$' + (n/1000000).toFixed(1) + 'M';
+  if (n >= 1000) return '$' + (n/1000).toFixed(0) + 'K';
+  return '$' + n.toFixed(0);
+}
+function timeAgo(iso) {
+  if (!iso) return '–';
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (diff < 60) return Math.round(diff) + 's ago';
+  if (diff < 3600) return Math.round(diff/60) + 'm ago';
+  if (diff < 86400) return Math.round(diff/3600) + 'h ago';
+  return Math.round(diff/86400) + 'd ago';
+}
+function statusColor(s) {
+  if (!s) return 'text-slate-400';
+  if (['dry_run','executed','executed_filled','executed_partial'].includes(s)) return 'text-green-400';
+  if (s.startsWith('rejected')) return 'text-yellow-400';
+  if (s.startsWith('error') || s === 'executed_cancelled') return 'text-red-400';
+  return 'text-slate-400';
+}
+function categoryTag(cat) {
+  return `<span class="tag-${cat||'other'} text-xs px-2 py-0.5 rounded">${cat||'other'}</span>`;
+}
+
+async function loadStats() {
+  const d = await fetch(API+'/api/stats').then(r=>r.json());
+  document.getElementById('totalSignals').textContent = d.total_signals ?? '–';
+
+  const pnl = d.daily_pnl ?? 0;
+  const pnlEl = document.getElementById('dailyPnl');
+  pnlEl.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
+  pnlEl.className = 'text-2xl font-bold ' + (pnl >= 0 ? 'text-green-400' : 'text-red-400');
+
+  const acc = d.accuracy ?? 0;
+  const accEl = document.getElementById('accuracy');
+  accEl.textContent = acc.toFixed(1) + '%' + (d.calibrated_trades > 0 ? ` (${d.calibrated_trades})` : '');
+  accEl.className = 'text-2xl font-bold ' + (acc >= 55 ? 'text-green-400' : acc >= 45 ? 'text-yellow-400' : 'text-red-400');
+
+  const lat = d.avg_latency_ms;
+  document.getElementById('latency').textContent = lat ? lat + 'ms' : '–';
+
+  const modeTag = document.getElementById('modeTag');
+  if (!d.dry_run) {
+    modeTag.textContent = '⚡ LIVE';
+    modeTag.className = 'text-xs px-2 py-0.5 rounded border border-red-500 text-red-400';
+  }
+
+  document.getElementById('lastUpdate').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+async function loadTrades() {
+  const trades = await fetch(API+'/api/trades?limit=30').then(r=>r.json());
+  const tbody = document.getElementById('tradeBody');
+  document.getElementById('tradeCount').textContent = trades.length + ' trades';
+
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-slate-500 py-8">No trades yet — run: python cli.py watch</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = trades.map(t => {
+    const cls = t.classification || '–';
+    const clsColor = cls === 'bullish' ? 'text-green-400' : cls === 'bearish' ? 'text-red-400' : 'text-slate-400';
+    const sideColor = t.side === 'YES' ? 'text-green-300' : 'text-red-300';
+    const sc = statusColor(t.status);
+    return `<tr>
+      <td class="text-slate-200 max-w-xs truncate" title="${t.market_question}">${t.market_question?.substring(0,48)}…</td>
+      <td><span class="${clsColor} font-bold">${cls.toUpperCase()}</span>
+          <span class="text-slate-500 text-xs ml-1">${t.materiality ? (t.materiality*100).toFixed(0)+'%' : ''}</span></td>
+      <td class="${sideColor} font-bold">${t.side}</td>
+      <td class="text-slate-200">$${(t.amount_usd||0).toFixed(2)}</td>
+      <td class="text-slate-400">${t.edge ? (t.edge*100).toFixed(1)+'%' : '–'}</td>
+      <td class="${sc}">${t.status}</td>
+      <td class="text-slate-500">${timeAgo(t.created_at)}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadCalibration() {
+  const cal = await fetch(API+'/api/calibration').then(r=>r.json());
+  const el = document.getElementById('accuracyBreakdown');
+
+  if (!cal.total) {
+    el.innerHTML = '<div class="text-slate-500 text-sm">No resolved trades yet</div>';
+    return;
+  }
+
+  let html = '';
+  if (cal.by_source && Object.keys(cal.by_source).length) {
+    html += '<div class="text-xs text-slate-500 mb-2">BY SOURCE</div>';
+    for (const [src, acc] of Object.entries(cal.by_source)) {
+      const color = acc >= 55 ? 'text-green-400' : acc >= 45 ? 'text-yellow-400' : 'text-red-400';
+      const bar = Math.round(acc);
+      html += `<div class="flex items-center gap-2 mb-1">
+        <span class="text-slate-400 text-xs w-16 truncate">${src}</span>
+        <div class="flex-1 bg-slate-700 rounded h-1.5">
+          <div class="h-1.5 rounded ${acc>=55?'bg-green-500':acc>=45?'bg-yellow-500':'bg-red-500'}" style="width:${bar}%"></div>
+        </div>
+        <span class="${color} text-xs w-10 text-right">${acc.toFixed(1)}%</span>
+      </div>`;
+    }
+  }
+  if (cal.by_classification && Object.keys(cal.by_classification).length) {
+    html += '<div class="text-xs text-slate-500 mt-3 mb-2">BY SIGNAL</div>';
+    for (const [cls, acc] of Object.entries(cal.by_classification)) {
+      const color = acc >= 55 ? 'text-green-400' : acc >= 45 ? 'text-yellow-400' : 'text-red-400';
+      html += `<div class="flex justify-between text-xs mb-1">
+        <span class="${cls==='bullish'?'text-green-400':'text-red-400'}">${cls}</span>
+        <span class="${color}">${acc.toFixed(1)}%</span>
+      </div>`;
+    }
+  }
+  el.innerHTML = html || '<div class="text-slate-500 text-sm">No data</div>';
+}
+
+async function loadNews() {
+  const news = await fetch(API+'/api/news?limit=15').then(r=>r.json());
+  const el = document.getElementById('newsFeed');
+  if (!news.length) {
+    el.innerHTML = '<div class="text-slate-500 text-sm">No news yet</div>';
+    return;
+  }
+  el.innerHTML = news.map(n => `
+    <div class="border-l-2 border-slate-600 pl-2">
+      <div class="text-xs text-slate-200 leading-tight">${n.headline?.substring(0,90)}</div>
+      <div class="flex gap-2 mt-0.5">
+        <span class="text-xs text-slate-500">${n.source}</span>
+        <span class="text-xs text-slate-600">${timeAgo(n.created_at)}</span>
+        ${n.triggered_trades > 0 ? `<span class="text-xs text-green-500">→ ${n.triggered_trades} signal</span>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+async function loadMarkets() {
+  const markets = await fetch(API+'/api/markets').then(r=>r.json());
+  const tbody = document.getElementById('marketsBody');
+
+  if (!Array.isArray(markets) || !markets.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-slate-500 py-4">No niche markets found</td></tr>';
+    document.getElementById('marketCount').textContent = '0 markets';
+    return;
+  }
+
+  document.getElementById('marketCount').textContent = markets.length + ' niche markets';
+  tbody.innerHTML = markets.map(m => {
+    const yesColor = m.yes_price > 0.6 ? 'text-green-400' : m.yes_price < 0.4 ? 'text-red-400' : 'text-slate-300';
+    return `<tr>
+      <td>${categoryTag(m.category)}</td>
+      <td class="text-slate-200 max-w-sm" title="${m.question}">${m.question?.substring(0,60)}${m.question?.length>60?'…':''}</td>
+      <td class="${yesColor} font-bold">${(m.yes_price*100).toFixed(0)}¢</td>
+      <td class="text-slate-400">${(m.no_price*100).toFixed(0)}¢</td>
+      <td class="text-slate-400">${fmtVol(m.volume)}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function refresh() {
+  await Promise.all([loadStats(), loadTrades(), loadCalibration(), loadNews(), loadMarkets()]);
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>
