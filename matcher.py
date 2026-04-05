@@ -1,12 +1,11 @@
 """
 News-to-market matching — routes breaking news to relevant active markets.
-Two strategies: fast weighted TF-IDF matching + category fallback.
+Uses length-weighted token overlap with bigram support (heuristic matching).
+Not a statistical TF-IDF: IDF is approximated by token length, not corpus frequency.
 """
 from __future__ import annotations
 
 import logging
-import math
-from collections import Counter
 from markets import Market
 
 log = logging.getLogger(__name__)

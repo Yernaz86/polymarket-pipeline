@@ -215,11 +215,20 @@ def log_run_end(run_id: int, markets_scanned: int, signals_found: int, trades_pl
 
 
 def get_daily_pnl() -> float:
+    """
+    Return total USD spent on live orders today (negative = loss exposure).
+    Matches 'filled', 'executed', and all 'executed_*' statuses from the
+    order-polling flow (executed_filled, executed_partial, executed_pending).
+    Excludes dry_run, rejected_*, and error_* statuses.
+    """
     conn = _conn()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     row = conn.execute(
         """SELECT COALESCE(SUM(
-               CASE WHEN status IN ('filled','executed') THEN -amount_usd ELSE 0 END
+               CASE WHEN status = 'filled'
+                      OR status = 'executed'
+                      OR status LIKE 'executed_%'
+                    THEN -amount_usd ELSE 0 END
            ), 0) as spent
            FROM trades WHERE created_at LIKE ?""",
         (f"{today}%",),

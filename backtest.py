@@ -178,9 +178,23 @@ def run_backtest(
     test_headlines: list[str] | None = None,
 ) -> BacktestReport:
     """
-    Run a backtest against resolved markets using real news headlines.
-    Fetches actual Google News headlines for each market question.
-    Falls back to NewsAPI if NEWSAPI_KEY is configured.
+    Headline sanity check against resolved markets.
+
+    IMPORTANT LIMITATIONS — do NOT use win rate here as a trading signal:
+
+    1. Look-ahead bias: news is fetched TODAY by keyword from Google News /
+       NewsAPI, with no date filter anchored to the market's resolution date.
+       Some headlines may have been published AFTER the market resolved.
+
+    2. Selection bias: markets with no findable news are silently skipped,
+       which skews the sample toward well-covered, easier-to-classify events.
+
+    3. Entry price is approximated at 0.5 (midpoint) because Polymarket does
+       not expose historical intraday prices via the public API.
+
+    This function is useful for verifying that the classifier produces
+    directional signals on real text. It is NOT a reliable estimate of
+    live trading win rate or expected return.
     """
     console.print("[bold]Fetching resolved niche markets...[/bold]")
     resolved = fetch_resolved_markets(limit=limit, category=category)
@@ -232,22 +246,21 @@ def run_backtest(
             # No news found — skip this market (can't make a real classification)
             continue
 
-        # Classify each headline; take the strongest non-neutral signal
-        best_cls = None
-        best_headline = ""
-        for headline in headlines_for_market:
-            cls = classify(headline, market, source="backtest")
-            if cls.direction == "neutral":
-                continue
-            if best_cls is None or cls.materiality > best_cls.materiality:
-                best_cls = cls
-                best_headline = headline
+        # Classify headlines in order; use the FIRST non-neutral signal.
+        # This mirrors real pipeline behaviour: the first relevant news event
+        # triggers the trade. Cherry-picking the strongest signal would
+        # overstate classifier quality.
+        cls = None
+        headline = ""
+        for candidate in headlines_for_market:
+            result = classify(candidate, market, source="backtest")
+            if result.direction != "neutral":
+                cls = result
+                headline = candidate
+                break
 
-        if best_cls is None:
-            continue  # all headlines neutral
-
-        cls = best_cls
-        headline = best_headline
+        if cls is None:
+            continue  # all headlines neutral for this market
 
         console.print(f"  [{i + 1}/{len(resolved)}] {question[:60]}...", end="\r")
 
