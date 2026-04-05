@@ -118,30 +118,37 @@ def fetch_real_news_for_market(question: str, newsapi_key: str = "") -> list[str
 def fetch_resolved_markets(limit: int = 50, category: str | None = None) -> list[dict]:
     """
     Fetch recently resolved niche markets from Gamma API.
-    Always pulls a large batch from the API (500) so the volume filter
-    has enough candidates — then trims to `limit` results.
-    Ordering by volume ascending surfaces smaller niche markets first.
+    Paginates through up to 3 pages of recently-closed markets (no volume
+    ordering) so the local $1K–$500K filter has enough candidates.
     """
     import json as _json
 
-    try:
-        resp = httpx.get(
-            f"{GAMMA_API}/markets",
-            params={
-                "limit": 500,        # fetch wide; filter narrows it down
-                "closed": True,
-                "order": "volume",
-                "ascending": True,   # small markets first → more niche hits
-            },
-            timeout=20,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        console.print(f"[red]Error fetching resolved markets: {e}[/red]")
-        return []
+    items: list[dict] = []
+    page_size = 500
+    for offset in range(0, page_size * 3, page_size):
+        try:
+            resp = httpx.get(
+                f"{GAMMA_API}/markets",
+                params={
+                    "limit": page_size,
+                    "offset": offset,
+                    "active": "false",   # resolved/closed markets
+                    "closed": "true",
+                },
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            console.print(f"[red]Error fetching resolved markets (offset {offset}): {e}[/red]")
+            break
 
-    items = data if isinstance(data, list) else data.get("data", [])
+        page = data if isinstance(data, list) else data.get("data", [])
+        if not page:
+            break
+        items.extend(page)
+        if len(page) < page_size:
+            break  # last page
 
     markets = []
     for m in items:
