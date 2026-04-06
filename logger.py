@@ -323,6 +323,71 @@ def get_calibration_stats() -> dict:
     }
 
 
+def get_signals_timeline(days: int = 7) -> list[dict]:
+    """Return daily signal count and exposure for the last N days."""
+    conn = _conn()
+    rows = conn.execute(
+        """SELECT
+             substr(created_at, 1, 10) as day,
+             COUNT(*) as signals,
+             COALESCE(SUM(amount_usd), 0) as exposure,
+             SUM(CASE WHEN classification='bullish' THEN 1 ELSE 0 END) as bullish,
+             SUM(CASE WHEN classification='bearish' THEN 1 ELSE 0 END) as bearish
+           FROM trades
+           WHERE created_at >= date('now', ?)
+           GROUP BY day
+           ORDER BY day ASC""",
+        (f"-{days} days",),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_signal_distribution() -> dict:
+    """Count signals by classification and side."""
+    conn = _conn()
+    by_cls = conn.execute(
+        """SELECT classification, COUNT(*) as c FROM trades
+           WHERE classification IS NOT NULL
+           GROUP BY classification"""
+    ).fetchall()
+    by_side = conn.execute(
+        """SELECT side, COUNT(*) as c FROM trades GROUP BY side"""
+    ).fetchall()
+    conn.close()
+    return {
+        "by_classification": {r["classification"]: r["c"] for r in by_cls},
+        "by_side": {r["side"]: r["c"] for r in by_side},
+    }
+
+
+def get_news_health() -> dict:
+    """Return news ingestion health: last receipt time + per-source counts today."""
+    conn = _conn()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    by_source = conn.execute(
+        """SELECT source, COUNT(*) as c,
+                  MAX(received_at) as last_seen
+           FROM news_events
+           WHERE created_at LIKE ?
+           GROUP BY source""",
+        (f"{today}%",),
+    ).fetchall()
+    last_row = conn.execute(
+        "SELECT MAX(received_at) as last FROM news_events"
+    ).fetchone()
+    total_today = conn.execute(
+        "SELECT COUNT(*) as c FROM news_events WHERE created_at LIKE ?",
+        (f"{today}%",),
+    ).fetchone()["c"]
+    conn.close()
+    return {
+        "last_news_at": last_row["last"] if last_row else None,
+        "total_today": total_today,
+        "by_source": {r["source"]: {"count": r["c"], "last_seen": r["last_seen"]} for r in by_source},
+    }
+
+
 def get_latency_stats() -> dict:
     conn = _conn()
     row = conn.execute("""

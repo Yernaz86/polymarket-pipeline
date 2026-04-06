@@ -59,6 +59,21 @@ def calibration():
     return logger.get_calibration_stats()
 
 
+@app.get("/api/timeline")
+def timeline(days: int = 7):
+    return logger.get_signals_timeline(days=days)
+
+
+@app.get("/api/distribution")
+def distribution():
+    return logger.get_signal_distribution()
+
+
+@app.get("/api/health")
+def health():
+    return logger.get_news_health()
+
+
 @app.get("/api/markets")
 def markets():
     try:
