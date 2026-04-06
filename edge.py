@@ -119,7 +119,12 @@ def detect_edge_v2(
 
 
 def size_position(edge: float) -> float:
-    """Quarter-Kelly position sizing. Capped at MAX_BET_USD."""
+    """
+    Edge-proportional position sizing, capped at MAX_BET_USD ($25 default).
+    Bet size = edge * 0.25 * (DAILY_LOSS_LIMIT_USD * 10).
+    The 0.25 scalar is a fixed conservative dampener — this is NOT Kelly sizing,
+    which would require win_rate and payout_ratio.
+    """
     fraction = edge * 0.25
     bankroll = config.DAILY_LOSS_LIMIT_USD * 10
     raw_size = bankroll * fraction

@@ -59,7 +59,7 @@ def score_market(market: Market, news: list[NewsItem]) -> dict:
 
     try:
         response = client.messages.create(
-            model=config.CLAUDE_MODEL,
+            model=config.SCORING_MODEL,
             max_tokens=500,
             temperature=0.2,
             messages=[{"role": "user", "content": prompt}],

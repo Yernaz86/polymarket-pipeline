@@ -18,10 +18,29 @@ def execute_trade(signal: Signal) -> dict:
     if daily_spent + signal.bet_amount > config.DAILY_LOSS_LIMIT_USD:
         return _log_and_return(signal, status="rejected_daily_limit", order_id=None)
 
+    if logger.has_trade_today(signal.market.condition_id):
+        return _log_and_return(signal, status="rejected_duplicate", order_id=None)
+
     if config.DRY_RUN:
         return _log_and_return(signal, status="dry_run", order_id=None)
 
+    _validate_live_credentials()
     return _execute_live(signal)
+
+
+def _validate_live_credentials() -> None:
+    """Raise RuntimeError if required live-trading credentials are missing."""
+    missing = [
+        name for name, val in [
+            ("POLYMARKET_API_KEY", config.POLYMARKET_API_KEY),
+            ("POLYMARKET_PRIVATE_KEY", config.POLYMARKET_PRIVATE_KEY),
+        ] if not val
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Live trading requires credentials that are not set: {', '.join(missing)}. "
+            "Set them in your .env file or environment before running with DRY_RUN=False."
+        )
 
 
 async def execute_trade_async(signal: Signal) -> dict:

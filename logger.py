@@ -218,6 +218,23 @@ def log_run_end(run_id: int, markets_scanned: int, signals_found: int, trades_pl
     conn.close()
 
 
+def has_trade_today(market_id: str) -> bool:
+    """Return True if a non-rejected, non-error trade was placed today for this market."""
+    conn = _conn()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    row = conn.execute(
+        """SELECT 1 FROM trades
+           WHERE market_id = ?
+             AND created_at LIKE ?
+             AND status NOT LIKE 'rejected_%'
+             AND status NOT LIKE 'error_%'
+           LIMIT 1""",
+        (market_id, f"{today}%"),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
 def get_daily_pnl() -> float:
     """
     Return total USD spent on live orders today (negative = loss exposure).

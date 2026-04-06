@@ -34,7 +34,11 @@ def check_resolutions():
     trades = logger.get_recent_trades(limit=100)
     unresolved = [
         t for t in trades
-        if t.get("classification") and t.get("status") in ("dry_run", "executed")
+        if t.get("classification")
+        and (
+            t.get("status") == "dry_run"
+            or (t.get("status") or "").startswith("executed_")
+        )
     ]
 
     if not unresolved:
