@@ -85,7 +85,27 @@ def _execute_live(signal: Signal) -> dict:
         fill_status, filled_usd = _poll_order_status(order_id, client, max_wait_s=30)
         status = f"executed_{fill_status}"
 
-        return _log_and_return(signal, status=status, order_id=order_id, filled_usd=filled_usd)
+        result = _log_and_return(signal, status=status, order_id=order_id, filled_usd=filled_usd)
+
+        # Track position for stop-loss monitoring
+        if fill_status in ("filled", "partial") and filled_usd and filled_usd > 0:
+            entry_price = price
+            shares = filled_usd / max(entry_price, 0.01)
+            stop_price = entry_price * (1.0 - config.STOP_LOSS_PCT)
+            logger.open_position(
+                trade_id=result["trade_id"],
+                market_id=signal.market.condition_id,
+                side=signal.side,
+                entry_price=entry_price,
+                shares=shares,
+                stop_loss_price=stop_price,
+            )
+            log.info(
+                f"[executor] Position opened: {signal.side} {shares:.2f} shares "
+                f"@ {entry_price:.3f}, stop @ {stop_price:.3f}"
+            )
+
+        return result
 
     except ImportError:
         return _log_and_return(signal, status="error_no_clob_client", order_id=None)

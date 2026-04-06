@@ -74,6 +74,14 @@ def health():
     return logger.get_news_health()
 
 
+@app.get("/api/positions")
+def positions():
+    return {
+        "summary": logger.get_positions_summary(),
+        "open": logger.get_open_positions(),
+    }
+
+
 @app.get("/api/markets")
 def markets():
     try:

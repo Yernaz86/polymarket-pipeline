@@ -47,6 +47,7 @@ MAX_VOLUME_USD = float(os.getenv("MAX_VOLUME_USD", "500000"))
 MIN_VOLUME_USD = float(os.getenv("MIN_VOLUME_USD", "1000"))
 MATERIALITY_THRESHOLD = float(os.getenv("MATERIALITY_THRESHOLD", "0.6"))
 SPEED_TARGET_SECONDS = float(os.getenv("SPEED_TARGET_SECONDS", "5"))
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.50"))  # exit position if it loses this fraction of entry value
 CLASSIFICATION_MODEL = "claude-haiku-4-5-20251001"
 SCORING_MODEL = "claude-sonnet-4-6-20250514"
 CLAUDE_MODEL = SCORING_MODEL  # alias for backward compatibility

@@ -67,6 +67,7 @@ class PipelineV2:
                 self._process_news(),
                 self._execute_signals(),
                 self._status_printer(),
+                self._stop_loss_monitor(),
                 return_exceptions=True,
             )
         except asyncio.CancelledError:
@@ -134,6 +135,41 @@ class PipelineV2:
                 f"on \"{result['market'][:40]}\" "
                 f"(edge:{result['edge']:.1%} latency:{result.get('latency_ms', 0)}ms)"
             )
+
+    async def _stop_loss_monitor(self):
+        """Check open positions every 60s; close any that breach their stop price."""
+        while True:
+            await asyncio.sleep(60)
+            try:
+                positions = logger.get_open_positions()
+                for pos in positions:
+                    snap = self.market_watcher.get_snapshot(pos["market_id"])
+                    if snap is None:
+                        continue
+
+                    # Current price of the token we hold
+                    current = snap.last_price if pos["side"] == "YES" else (1.0 - snap.last_price)
+                    logger.update_position_price(pos["market_id"], current)
+
+                    if current <= pos["stop_loss_price"]:
+                        pnl = (current - pos["entry_price"]) * pos["shares"]
+                        console.print(
+                            f"  [red bold]STOP-LOSS[/red bold] "
+                            f"{pos['side']} {pos['market_id'][:20]}… "
+                            f"entry={pos['entry_price']:.3f} "
+                            f"current={current:.3f} "
+                            f"PnL=${pnl:.2f}"
+                        )
+                        logger.close_position(pos["trade_id"], current, reason="stop_loss")
+                        if not config.DRY_RUN:
+                            # Live sell not yet implemented — position closed in DB
+                            log.warning(
+                                f"[stop-loss] Live sell order not yet implemented "
+                                f"for trade_id={pos['trade_id']}. "
+                                "Position marked closed in DB — cancel manually if needed."
+                            )
+            except Exception as e:
+                log.warning(f"[stop-loss] Monitor error: {e}")
 
     async def _status_printer(self):
         """Print periodic status updates."""

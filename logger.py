@@ -82,6 +82,24 @@ def init_db():
             resolved_at TEXT,
             UNIQUE(trade_id)
         );
+
+        CREATE TABLE IF NOT EXISTS positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id INTEGER NOT NULL REFERENCES trades(id),
+            market_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            shares REAL NOT NULL,
+            stop_loss_price REAL NOT NULL,
+            current_price REAL,
+            unrealized_pnl REAL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'open',
+            opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+            closed_at TEXT,
+            exit_price REAL,
+            exit_reason TEXT,
+            UNIQUE(trade_id)
+        );
     """)
     # Add V2 columns to existing trades table if missing
     _migrate_v2_columns(conn)
@@ -429,6 +447,93 @@ def get_latency_stats() -> dict:
         "avg_news_ms": round(row["avg_news"] or 0),
         "avg_class_ms": round(row["avg_class"] or 0),
         "count": row["count"],
+    }
+
+
+def open_position(
+    trade_id: int,
+    market_id: str,
+    side: str,
+    entry_price: float,
+    shares: float,
+    stop_loss_price: float,
+) -> int:
+    """Record a new open position after a successful fill."""
+    conn = _conn()
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO positions
+           (trade_id, market_id, side, entry_price, shares, stop_loss_price, current_price)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (trade_id, market_id, side, entry_price, shares, stop_loss_price, entry_price),
+    )
+    pos_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return pos_id
+
+
+def get_open_positions() -> list[dict]:
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT * FROM positions WHERE status = 'open' ORDER BY opened_at DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_position_price(market_id: str, current_price: float) -> None:
+    """Update current price and unrealized P&L for all open positions on this market."""
+    conn = _conn()
+    conn.execute(
+        """UPDATE positions
+           SET current_price = ?,
+               unrealized_pnl = (? - entry_price) * shares
+           WHERE market_id = ? AND status = 'open'""",
+        (current_price, current_price, market_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def close_position(trade_id: int, exit_price: float, reason: str) -> None:
+    """Mark a position as closed."""
+    conn = _conn()
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """UPDATE positions
+           SET status = ?,
+               closed_at = ?,
+               exit_price = ?,
+               exit_reason = ?,
+               unrealized_pnl = (? - entry_price) * shares
+           WHERE trade_id = ?""",
+        (f"closed_{reason}", now, exit_price, reason, exit_price, trade_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_positions_summary() -> dict:
+    """Return summary stats for open and closed positions."""
+    conn = _conn()
+    open_row = conn.execute(
+        """SELECT COUNT(*) as count,
+                  COALESCE(SUM(unrealized_pnl), 0) as total_upnl,
+                  COALESCE(SUM(entry_price * shares), 0) as total_exposure
+           FROM positions WHERE status = 'open'"""
+    ).fetchone()
+    closed_row = conn.execute(
+        """SELECT COUNT(*) as count,
+                  COALESCE(SUM(unrealized_pnl), 0) as total_realized
+           FROM positions WHERE status != 'open'"""
+    ).fetchone()
+    conn.close()
+    return {
+        "open_count": open_row["count"],
+        "open_unrealized_pnl": round(open_row["total_upnl"], 2),
+        "open_exposure_usd": round(open_row["total_exposure"], 2),
+        "closed_count": closed_row["count"],
+        "closed_realized_pnl": round(closed_row["total_realized"], 2),
     }
 
 
