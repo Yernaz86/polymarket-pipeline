@@ -48,6 +48,77 @@ async def execute_trade_async(signal: Signal) -> dict:
     return await asyncio.get_event_loop().run_in_executor(None, execute_trade, signal)
 
 
+def close_position_live(position: dict, current_price: float) -> dict:
+    """
+    Place a SELL order to close an open position at the given price.
+
+    Args:
+        position: dict from logger.get_open_positions() — must have token_id, shares, trade_id
+        current_price: price at which to place the sell limit order
+    """
+    trade_id = position.get("trade_id")
+    try:
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import OrderArgs, OrderType
+
+        _validate_live_credentials()
+
+        token_id = position.get("token_id", "")
+        if not token_id:
+            log.error(f"[executor] close_position_live: no token_id for trade_id={trade_id}")
+            return {"status": "error_no_token", "trade_id": trade_id}
+
+        client = ClobClient(
+            host=config.POLYMARKET_HOST,
+            key=config.POLYMARKET_API_KEY,
+            chain_id=137,
+            funder=config.POLYMARKET_PRIVATE_KEY,
+        )
+        client.set_api_creds(client.create_or_derive_api_creds())
+
+        shares = float(position.get("shares", 0))
+        if shares <= 0:
+            log.error(f"[executor] close_position_live: zero shares for trade_id={trade_id}")
+            return {"status": "error_zero_shares", "trade_id": trade_id}
+
+        order_args = OrderArgs(
+            price=current_price,
+            size=shares,
+            side="SELL",
+            token_id=token_id,
+        )
+
+        signed_order = client.create_order(order_args)
+        resp = client.post_order(signed_order, OrderType.GTC)
+        order_id = resp.get("orderID", resp.get("id", "unknown"))
+
+        fill_status, _ = _poll_order_status(order_id, client, max_wait_s=30)
+        reason = f"sell_{fill_status}"
+        logger.close_position(trade_id, current_price, reason=reason)
+
+        log.info(
+            f"[executor] Position closed: trade_id={trade_id} "
+            f"status={fill_status} price={current_price:.4f}"
+        )
+        return {"status": f"closed_{fill_status}", "trade_id": trade_id, "order_id": order_id}
+
+    except ImportError:
+        logger.close_position(trade_id, current_price, reason="error_no_clob_client")
+        return {"status": "error_no_clob_client", "trade_id": trade_id}
+    except Exception as e:
+        err = f"error_{type(e).__name__}"
+        log.error(f"[executor] close_position_live failed for trade_id={trade_id}: {e}")
+        logger.close_position(trade_id, current_price, reason=err)
+        return {"status": err, "trade_id": trade_id}
+
+
+async def close_position_live_async(position: dict, current_price: float) -> dict:
+    """Async wrapper around close_position_live."""
+    return await asyncio.get_event_loop().run_in_executor(
+        None, close_position_live, position, current_price
+    )
+
+
 def _execute_live(signal: Signal) -> dict:
     """Place a real order via Polymarket CLOB client."""
     try:
@@ -87,7 +158,7 @@ def _execute_live(signal: Signal) -> dict:
 
         result = _log_and_return(signal, status=status, order_id=order_id, filled_usd=filled_usd)
 
-        # Track position for stop-loss monitoring
+        # Track position for stop-loss / expiry monitoring
         if fill_status in ("filled", "partial") and filled_usd and filled_usd > 0:
             entry_price = price
             shares = filled_usd / max(entry_price, 0.01)
@@ -99,10 +170,13 @@ def _execute_live(signal: Signal) -> dict:
                 entry_price=entry_price,
                 shares=shares,
                 stop_loss_price=stop_price,
+                token_id=token_id or "",
+                market_end_date=signal.market.end_date or "",
             )
             log.info(
                 f"[executor] Position opened: {signal.side} {shares:.2f} shares "
-                f"@ {entry_price:.3f}, stop @ {stop_price:.3f}"
+                f"@ {entry_price:.3f}, stop @ {stop_price:.3f}, "
+                f"expires {signal.market.end_date}"
             )
 
         return result

@@ -235,6 +235,35 @@
   </div>
 </div>
 
+<!-- ─── OPEN POSITIONS ───────────────────────────────────────── -->
+<div class="card mb-5">
+  <div class="flex items-center justify-between p-4 border-b border-white/5">
+    <h2 class="text-sm font-semibold text-slate-300 flex items-center gap-2">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="1.5" y="3.5" width="11" height="8" rx="1.5" stroke="#10b981" stroke-width="1.4"/><path d="M4.5 3.5V2.5a2.5 2.5 0 015 0v1" stroke="#10b981" stroke-width="1.2" stroke-linecap="round"/></svg>
+      OPEN POSITIONS
+    </h2>
+    <span id="positionSummary" class="text-xs text-slate-500"></span>
+  </div>
+  <div class="overflow-x-auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Side</th>
+          <th>Market</th>
+          <th>Entry</th>
+          <th>Current</th>
+          <th>P&amp;L</th>
+          <th>Stop</th>
+          <th>Expires</th>
+        </tr>
+      </thead>
+      <tbody id="positionsBody">
+        <tr><td colspan="7" class="text-center text-slate-600 py-6 text-sm">No open positions</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
 <!-- ─── MARKETS ─────────────────────────────────────────────── -->
 <div class="card">
   <div class="flex items-center justify-between p-4 border-b border-white/5">
@@ -529,6 +558,56 @@ async function loadMarkets() {
   }).join('');
 }
 
+/* ── open positions ── */
+async function loadPositions() {
+  let data;
+  try { data = await fetch(API+'/api/positions').then(r=>r.json()); }
+  catch(e) { return; }
+
+  const summary = data.summary || {};
+  const open = data.open || [];
+  const tbody = document.getElementById('positionsBody');
+
+  // Summary chip
+  const upnl = (summary.open_unrealized_pnl || 0).toFixed(2);
+  const upnlColor = summary.open_unrealized_pnl >= 0 ? '#10b981' : '#ef4444';
+  document.getElementById('positionSummary').innerHTML =
+    `${summary.open_count || 0} open &nbsp;·&nbsp; Exposure: $${(summary.open_exposure_usd||0).toFixed(2)} &nbsp;·&nbsp; ` +
+    `Unrealized: <span style="color:${upnlColor}">$${upnl}</span>`;
+
+  if (!open.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-slate-600 py-6 text-sm">No open positions</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = open.map(p => {
+    const pnl = ((p.current_price||p.entry_price) - p.entry_price) * p.shares;
+    const pnlStr = (pnl >= 0 ? '+' : '') + pnl.toFixed(2);
+    const pnlColor = pnl >= 0 ? '#10b981' : '#ef4444';
+    const sideColor = p.side === 'YES' ? '#6366f1' : '#f59e0b';
+
+    // Hours until expiry
+    let expiryStr = '—';
+    if (p.market_end_date) {
+      const hrs = (new Date(p.market_end_date) - Date.now()) / 3_600_000;
+      if (hrs < 0) expiryStr = '<span style="color:#ef4444">EXPIRED</span>';
+      else if (hrs < 2) expiryStr = `<span style="color:#f59e0b">${hrs.toFixed(1)}h</span>`;
+      else expiryStr = `${hrs.toFixed(0)}h`;
+    }
+
+    const q = (p.market_question || p.market_id || '').slice(0, 55);
+    return `<tr>
+      <td><span style="color:${sideColor};font-weight:600">${p.side}</span></td>
+      <td title="${p.market_question||''}" style="max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${q}</td>
+      <td>${(p.entry_price||0).toFixed(3)}</td>
+      <td>${(p.current_price||p.entry_price||0).toFixed(3)}</td>
+      <td style="color:${pnlColor};font-weight:600">$${pnlStr}</td>
+      <td style="color:#64748b">${(p.stop_loss_price||0).toFixed(3)}</td>
+      <td>${expiryStr}</td>
+    </tr>`;
+  }).join('');
+}
+
 /* ── full refresh ── */
 async function refresh() {
   await Promise.all([
@@ -536,6 +615,7 @@ async function refresh() {
     loadTimeline(), loadDistribution(),
     loadTrades(), loadCalibration(),
     loadNews(), loadMarkets(),
+    loadPositions(),
   ]);
 }
 

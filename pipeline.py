@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 import logging
+from datetime import datetime, timezone
 
 from rich.console import Console
 from rich.table import Table
@@ -20,7 +21,7 @@ from scraper import scrape_all
 from markets import fetch_active_markets, filter_by_categories
 from scorer import score_market, filter_news_for_market
 from edge import detect_edge, detect_edge_v2, Signal
-from executor import execute_trade, execute_trade_async
+from executor import execute_trade, execute_trade_async, close_position_live_async
 from news_stream import NewsAggregator, NewsEvent
 from market_watcher import MarketWatcher
 from matcher import match_news_to_markets
@@ -67,7 +68,7 @@ class PipelineV2:
                 self._process_news(),
                 self._execute_signals(),
                 self._status_printer(),
-                self._stop_loss_monitor(),
+                self._position_monitor(),
                 return_exceptions=True,
             )
         except asyncio.CancelledError:
@@ -136,40 +137,73 @@ class PipelineV2:
                 f"(edge:{result['edge']:.1%} latency:{result.get('latency_ms', 0)}ms)"
             )
 
-    async def _stop_loss_monitor(self):
-        """Check open positions every 60s; close any that breach their stop price."""
+    async def _position_monitor(self):
+        """
+        Check open positions every 60s for:
+        1. Stop-loss breach  — current price fell below stop_loss_price
+        2. Pre-expiry exit   — market closes within HOURS_BEFORE_EXPIRY hours
+        Places real SELL orders in live mode; DB-only update in dry-run.
+        """
         while True:
             await asyncio.sleep(60)
             try:
                 positions = logger.get_open_positions()
+                if not positions:
+                    continue
+
                 for pos in positions:
                     snap = self.market_watcher.get_snapshot(pos["market_id"])
                     if snap is None:
                         continue
 
-                    # Current price of the token we hold
-                    current = snap.last_price if pos["side"] == "YES" else (1.0 - snap.last_price)
+                    current = (
+                        snap.last_price if pos["side"] == "YES"
+                        else (1.0 - snap.last_price)
+                    )
                     logger.update_position_price(pos["market_id"], current)
+                    pnl = (current - pos["entry_price"]) * pos["shares"]
+                    label = (pos.get("market_question") or pos["market_id"])[:50]
 
+                    # --- Stop-loss ---
                     if current <= pos["stop_loss_price"]:
-                        pnl = (current - pos["entry_price"]) * pos["shares"]
                         console.print(
-                            f"  [red bold]STOP-LOSS[/red bold] "
-                            f"{pos['side']} {pos['market_id'][:20]}… "
-                            f"entry={pos['entry_price']:.3f} "
-                            f"current={current:.3f} "
-                            f"PnL=${pnl:.2f}"
+                            f"  [red bold]STOP-LOSS[/red bold] {pos['side']} "
+                            f"\"{label}\" "
+                            f"entry={pos['entry_price']:.3f} now={current:.3f} "
+                            f"PnL=[red]${pnl:.2f}[/red]"
                         )
-                        logger.close_position(pos["trade_id"], current, reason="stop_loss")
-                        if not config.DRY_RUN:
-                            # Live sell not yet implemented — position closed in DB
-                            log.warning(
-                                f"[stop-loss] Live sell order not yet implemented "
-                                f"for trade_id={pos['trade_id']}. "
-                                "Position marked closed in DB — cancel manually if needed."
-                            )
+                        await self._close_position(pos, current, reason="stop_loss")
+                        continue
+
+                    # --- Pre-expiry exit ---
+                    hours_left = _hours_until(pos.get("market_end_date", ""))
+                    if 0 < hours_left <= config.HOURS_BEFORE_EXPIRY:
+                        pnl_color = "green" if pnl >= 0 else "red"
+                        console.print(
+                            f"  [yellow bold]EXPIRY EXIT[/yellow bold] {pos['side']} "
+                            f"\"{label}\" "
+                            f"expires in {hours_left:.1f}h "
+                            f"PnL=[{pnl_color}]${pnl:.2f}[/{pnl_color}]"
+                        )
+                        await self._close_position(pos, current, reason="expiry")
+
             except Exception as e:
-                log.warning(f"[stop-loss] Monitor error: {e}")
+                log.warning(f"[position-monitor] Error: {e}")
+
+    async def _close_position(self, pos: dict, current_price: float, reason: str):
+        """Close a position: DB-only in dry-run; real SELL order in live mode."""
+        if config.DRY_RUN:
+            logger.close_position(pos["trade_id"], current_price, reason=reason)
+            log.info(
+                f"[position-monitor] DRY-RUN close trade_id={pos['trade_id']} "
+                f"reason={reason} price={current_price:.4f}"
+            )
+        else:
+            result = await close_position_live_async(pos, current_price)
+            console.print(
+                f"  [dim]Sell order → {result['status']} "
+                f"trade_id={result['trade_id']}[/dim]"
+            )
 
     async def _status_printer(self):
         """Print periodic status updates."""
@@ -185,6 +219,18 @@ class PipelineV2:
                 f"trades={self.stats['trades_executed']} "
                 f"markets={len(self.market_watcher.tracked_markets)}[/dim]\n"
             )
+
+
+def _hours_until(end_date_str: str) -> float:
+    """Return hours until the given ISO date string. Returns inf on parse failure."""
+    if not end_date_str:
+        return float("inf")
+    try:
+        end = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+        delta = (end - datetime.now(timezone.utc)).total_seconds()
+        return delta / 3600
+    except Exception:
+        return float("inf")
 
 
 def run_pipeline_v2():

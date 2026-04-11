@@ -91,6 +91,8 @@ def init_db():
             entry_price REAL NOT NULL,
             shares REAL NOT NULL,
             stop_loss_price REAL NOT NULL,
+            token_id TEXT,
+            market_end_date TEXT,
             current_price REAL,
             unrealized_pnl REAL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'open',
@@ -103,6 +105,7 @@ def init_db():
     """)
     # Add V2 columns to existing trades table if missing
     _migrate_v2_columns(conn)
+    _migrate_positions_columns(conn)
     conn.close()
 
 
@@ -117,11 +120,25 @@ def _migrate_v2_columns(conn):
         ("news_latency_ms", "INTEGER"),
         ("classification_latency_ms", "INTEGER"),
         ("total_latency_ms", "INTEGER"),
-        ("filled_usd", "REAL"),  # actual fill amount for partial/full fills; NULL = unknown
+        ("filled_usd", "REAL"),
     ]
     for col_name, col_type in new_cols:
         if col_name not in columns:
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+    conn.commit()
+
+
+def _migrate_positions_columns(conn):
+    """Add new columns to positions table for existing DBs."""
+    cursor = conn.execute("PRAGMA table_info(positions)")
+    columns = {row[1] for row in cursor.fetchall()}
+    new_cols = [
+        ("token_id", "TEXT"),
+        ("market_end_date", "TEXT"),
+    ]
+    for col_name, col_type in new_cols:
+        if col_name not in columns:
+            conn.execute(f"ALTER TABLE positions ADD COLUMN {col_name} {col_type}")
     conn.commit()
 
 
@@ -457,14 +474,18 @@ def open_position(
     entry_price: float,
     shares: float,
     stop_loss_price: float,
+    token_id: str = "",
+    market_end_date: str = "",
 ) -> int:
     """Record a new open position after a successful fill."""
     conn = _conn()
     cur = conn.execute(
         """INSERT OR IGNORE INTO positions
-           (trade_id, market_id, side, entry_price, shares, stop_loss_price, current_price)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (trade_id, market_id, side, entry_price, shares, stop_loss_price, entry_price),
+           (trade_id, market_id, side, entry_price, shares, stop_loss_price,
+            current_price, token_id, market_end_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (trade_id, market_id, side, entry_price, shares, stop_loss_price,
+         entry_price, token_id, market_end_date),
     )
     pos_id = cur.lastrowid
     conn.commit()
@@ -473,9 +494,14 @@ def open_position(
 
 
 def get_open_positions() -> list[dict]:
+    """Return all open positions joined with market_question from trades."""
     conn = _conn()
     rows = conn.execute(
-        "SELECT * FROM positions WHERE status = 'open' ORDER BY opened_at DESC"
+        """SELECT p.*, t.market_question
+           FROM positions p
+           JOIN trades t ON p.trade_id = t.id
+           WHERE p.status = 'open'
+           ORDER BY p.opened_at DESC"""
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
