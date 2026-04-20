@@ -82,9 +82,30 @@ def init_db():
             resolved_at TEXT,
             UNIQUE(trade_id)
         );
+
+        CREATE TABLE IF NOT EXISTS positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id INTEGER NOT NULL REFERENCES trades(id),
+            market_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            shares REAL NOT NULL,
+            stop_loss_price REAL NOT NULL,
+            token_id TEXT,
+            market_end_date TEXT,
+            current_price REAL,
+            unrealized_pnl REAL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'open',
+            opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+            closed_at TEXT,
+            exit_price REAL,
+            exit_reason TEXT,
+            UNIQUE(trade_id)
+        );
     """)
     # Add V2 columns to existing trades table if missing
     _migrate_v2_columns(conn)
+    _migrate_positions_columns(conn)
     conn.close()
 
 
@@ -99,10 +120,25 @@ def _migrate_v2_columns(conn):
         ("news_latency_ms", "INTEGER"),
         ("classification_latency_ms", "INTEGER"),
         ("total_latency_ms", "INTEGER"),
+        ("filled_usd", "REAL"),
     ]
     for col_name, col_type in new_cols:
         if col_name not in columns:
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+    conn.commit()
+
+
+def _migrate_positions_columns(conn):
+    """Add new columns to positions table for existing DBs."""
+    cursor = conn.execute("PRAGMA table_info(positions)")
+    columns = {row[1] for row in cursor.fetchall()}
+    new_cols = [
+        ("token_id", "TEXT"),
+        ("market_end_date", "TEXT"),
+    ]
+    for col_name, col_type in new_cols:
+        if col_name not in columns:
+            conn.execute(f"ALTER TABLE positions ADD COLUMN {col_name} {col_type}")
     conn.commit()
 
 
@@ -124,6 +160,7 @@ def log_trade(
     news_latency_ms: int | None = None,
     classification_latency_ms: int | None = None,
     total_latency_ms: int | None = None,
+    filled_usd: float | None = None,
 ) -> int:
     conn = _conn()
     cur = conn.execute(
@@ -131,12 +168,14 @@ def log_trade(
            (market_id, market_question, claude_score, market_price, edge,
             side, amount_usd, order_id, status, reasoning, headlines,
             news_source, classification, materiality,
-            news_latency_ms, classification_latency_ms, total_latency_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            news_latency_ms, classification_latency_ms, total_latency_ms,
+            filled_usd)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (market_id, market_question, claude_score, market_price, edge,
          side, amount_usd, order_id, status, reasoning, headlines,
          news_source, classification, materiality,
-         news_latency_ms, classification_latency_ms, total_latency_ms),
+         news_latency_ms, classification_latency_ms, total_latency_ms,
+         filled_usd),
     )
     trade_id = cur.lastrowid
     conn.commit()
@@ -214,12 +253,50 @@ def log_run_end(run_id: int, markets_scanned: int, signals_found: int, trades_pl
     conn.close()
 
 
+def has_trade_today(market_id: str) -> bool:
+    """Return True if a non-rejected, non-error trade was placed today for this market."""
+    conn = _conn()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    row = conn.execute(
+        """SELECT 1 FROM trades
+           WHERE market_id = ?
+             AND created_at LIKE ?
+             AND status NOT LIKE 'rejected_%'
+             AND status NOT LIKE 'error_%'
+           LIMIT 1""",
+        (market_id, f"{today}%"),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
 def get_daily_pnl() -> float:
+    """
+    Return total USD spent on live orders today (negative = loss exposure).
+
+    Per-status accounting:
+    - 'filled' / 'executed' / 'executed_filled': count full amount_usd
+    - 'executed_partial': count filled_usd (actual fill); falls back to
+      amount_usd if filled_usd was not recorded (conservative)
+    - 'executed_cancelled': count 0 (order did not fill, no capital deployed)
+    - 'executed_pending': count full amount_usd (pessimistic; order may still fill)
+    - dry_run / rejected_* / error_*: count 0
+    """
     conn = _conn()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     row = conn.execute(
         """SELECT COALESCE(SUM(
-               CASE WHEN status IN ('filled','executed') THEN -amount_usd ELSE 0 END
+               CASE
+                 WHEN status IN ('filled', 'executed', 'executed_filled')
+                   THEN -amount_usd
+                 WHEN status = 'executed_partial'
+                   THEN -COALESCE(filled_usd, amount_usd)
+                 WHEN status = 'executed_pending'
+                   THEN -amount_usd
+                 WHEN status = 'executed_cancelled'
+                   THEN 0
+                 ELSE 0
+               END
            ), 0) as spent
            FROM trades WHERE created_at LIKE ?""",
         (f"{today}%",),
@@ -298,6 +375,71 @@ def get_calibration_stats() -> dict:
     }
 
 
+def get_signals_timeline(days: int = 7) -> list[dict]:
+    """Return daily signal count and exposure for the last N days."""
+    conn = _conn()
+    rows = conn.execute(
+        """SELECT
+             substr(created_at, 1, 10) as day,
+             COUNT(*) as signals,
+             COALESCE(SUM(amount_usd), 0) as exposure,
+             SUM(CASE WHEN classification='bullish' THEN 1 ELSE 0 END) as bullish,
+             SUM(CASE WHEN classification='bearish' THEN 1 ELSE 0 END) as bearish
+           FROM trades
+           WHERE created_at >= date('now', ?)
+           GROUP BY day
+           ORDER BY day ASC""",
+        (f"-{days} days",),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_signal_distribution() -> dict:
+    """Count signals by classification and side."""
+    conn = _conn()
+    by_cls = conn.execute(
+        """SELECT classification, COUNT(*) as c FROM trades
+           WHERE classification IS NOT NULL
+           GROUP BY classification"""
+    ).fetchall()
+    by_side = conn.execute(
+        """SELECT side, COUNT(*) as c FROM trades GROUP BY side"""
+    ).fetchall()
+    conn.close()
+    return {
+        "by_classification": {r["classification"]: r["c"] for r in by_cls},
+        "by_side": {r["side"]: r["c"] for r in by_side},
+    }
+
+
+def get_news_health() -> dict:
+    """Return news ingestion health: last receipt time + per-source counts today."""
+    conn = _conn()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    by_source = conn.execute(
+        """SELECT source, COUNT(*) as c,
+                  MAX(received_at) as last_seen
+           FROM news_events
+           WHERE created_at LIKE ?
+           GROUP BY source""",
+        (f"{today}%",),
+    ).fetchall()
+    last_row = conn.execute(
+        "SELECT MAX(received_at) as last FROM news_events"
+    ).fetchone()
+    total_today = conn.execute(
+        "SELECT COUNT(*) as c FROM news_events WHERE created_at LIKE ?",
+        (f"{today}%",),
+    ).fetchone()["c"]
+    conn.close()
+    return {
+        "last_news_at": last_row["last"] if last_row else None,
+        "total_today": total_today,
+        "by_source": {r["source"]: {"count": r["c"], "last_seen": r["last_seen"]} for r in by_source},
+    }
+
+
 def get_latency_stats() -> dict:
     conn = _conn()
     row = conn.execute("""
@@ -322,6 +464,102 @@ def get_latency_stats() -> dict:
         "avg_news_ms": round(row["avg_news"] or 0),
         "avg_class_ms": round(row["avg_class"] or 0),
         "count": row["count"],
+    }
+
+
+def open_position(
+    trade_id: int,
+    market_id: str,
+    side: str,
+    entry_price: float,
+    shares: float,
+    stop_loss_price: float,
+    token_id: str = "",
+    market_end_date: str = "",
+) -> int:
+    """Record a new open position after a successful fill."""
+    conn = _conn()
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO positions
+           (trade_id, market_id, side, entry_price, shares, stop_loss_price,
+            current_price, token_id, market_end_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (trade_id, market_id, side, entry_price, shares, stop_loss_price,
+         entry_price, token_id, market_end_date),
+    )
+    pos_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return pos_id
+
+
+def get_open_positions() -> list[dict]:
+    """Return all open positions joined with market_question from trades."""
+    conn = _conn()
+    rows = conn.execute(
+        """SELECT p.*, t.market_question
+           FROM positions p
+           JOIN trades t ON p.trade_id = t.id
+           WHERE p.status = 'open'
+           ORDER BY p.opened_at DESC"""
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_position_price(market_id: str, current_price: float) -> None:
+    """Update current price and unrealized P&L for all open positions on this market."""
+    conn = _conn()
+    conn.execute(
+        """UPDATE positions
+           SET current_price = ?,
+               unrealized_pnl = (? - entry_price) * shares
+           WHERE market_id = ? AND status = 'open'""",
+        (current_price, current_price, market_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def close_position(trade_id: int, exit_price: float, reason: str) -> None:
+    """Mark a position as closed."""
+    conn = _conn()
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """UPDATE positions
+           SET status = ?,
+               closed_at = ?,
+               exit_price = ?,
+               exit_reason = ?,
+               unrealized_pnl = (? - entry_price) * shares
+           WHERE trade_id = ?""",
+        (f"closed_{reason}", now, exit_price, reason, exit_price, trade_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_positions_summary() -> dict:
+    """Return summary stats for open and closed positions."""
+    conn = _conn()
+    open_row = conn.execute(
+        """SELECT COUNT(*) as count,
+                  COALESCE(SUM(unrealized_pnl), 0) as total_upnl,
+                  COALESCE(SUM(entry_price * shares), 0) as total_exposure
+           FROM positions WHERE status = 'open'"""
+    ).fetchone()
+    closed_row = conn.execute(
+        """SELECT COUNT(*) as count,
+                  COALESCE(SUM(unrealized_pnl), 0) as total_realized
+           FROM positions WHERE status != 'open'"""
+    ).fetchone()
+    conn.close()
+    return {
+        "open_count": open_row["count"],
+        "open_unrealized_pnl": round(open_row["total_upnl"], 2),
+        "open_exposure_usd": round(open_row["total_exposure"], 2),
+        "closed_count": closed_row["count"],
+        "closed_realized_pnl": round(closed_row["total_realized"], 2),
     }
 
 

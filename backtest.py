@@ -1,18 +1,19 @@
 """
 Backtest engine — validate the V2 strategy against historical data.
-Replays resolved markets with their news coverage through the classifier.
+Replays resolved markets with real news coverage through the classifier.
 """
 from __future__ import annotations
 
 import time
 import logging
+import urllib.parse
 from dataclasses import dataclass
 
 import httpx
+import feedparser
 
 from rich.console import Console
 from rich.table import Table
-from rich.panel import Panel
 
 import config
 from markets import Market
@@ -50,32 +51,126 @@ class BacktestReport:
     results: list[BacktestResult]
 
 
-def fetch_resolved_markets(limit: int = 50, category: str | None = None) -> list[dict]:
-    """Fetch recently resolved markets from Gamma API."""
-    params = {
-        "limit": limit,
-        "closed": True,
-        "order": "volume",
-        "ascending": False,
+def _extract_search_query(question: str) -> str:
+    """Extract a concise search query from a market question."""
+    stopwords = {
+        "will", "the", "a", "an", "be", "by", "in", "on", "at", "to", "of",
+        "for", "is", "it", "this", "that", "and", "or", "not", "before",
+        "after", "end", "yes", "no", "any", "has", "have", "does", "do",
+        "than", "more", "less", "over", "under", "above", "below", "reach",
+        "exceed", "happen", "occur", "least", "most", "first", "last", "2025",
+        "2026", "2024", "january", "february", "march", "april", "may", "june",
+        "july", "august", "september", "october", "november", "december",
     }
+    words = question.split()
+    keywords = [
+        w.strip("?.,!\"'()[]")
+        for w in words
+        if w.strip("?.,!\"'()[]").lower() not in stopwords
+        and len(w.strip("?.,!\"'()[]")) > 3
+    ]
+    return " ".join(keywords[:6])
 
-    try:
-        resp = httpx.get(f"{GAMMA_API}/markets", params=params, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        console.print(f"[red]Error fetching resolved markets: {e}[/red]")
+
+def fetch_real_news_for_market(question: str, newsapi_key: str = "") -> list[str]:
+    """
+    Fetch real news headlines related to a market question.
+    Uses NewsAPI if key is provided, otherwise falls back to Google News RSS.
+    Returns up to 5 real headlines.
+    """
+    query = _extract_search_query(question)
+    if not query:
         return []
 
-    items = data if isinstance(data, list) else data.get("data", [])
+    # Try NewsAPI first (requires key)
+    if newsapi_key:
+        try:
+            resp = httpx.get(
+                "https://newsapi.org/v2/everything",
+                params={
+                    "q": query,
+                    "language": "en",
+                    "sortBy": "relevancy",
+                    "pageSize": 5,
+                    "apiKey": newsapi_key,
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            articles = resp.json().get("articles", [])
+            headlines = [a["title"] for a in articles if a.get("title")]
+            if headlines:
+                return headlines[:5]
+        except Exception:
+            pass  # fall through to RSS
+
+    # Fallback: Google News RSS (no API key required)
+    try:
+        encoded_query = urllib.parse.quote(query)
+        url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
+        feed = feedparser.parse(url)
+        headlines = [entry.title for entry in feed.entries[:5] if entry.get("title")]
+        return headlines
+    except Exception:
+        return []
+
+
+def fetch_resolved_markets(limit: int = 50, category: str | None = None) -> list[dict]:
+    """
+    Fetch recently resolved niche markets from Gamma API.
+    Paginates through up to 3 pages of recently-closed markets (no volume
+    ordering) so the local $1K–$500K filter has enough candidates.
+    """
+    import json as _json
+    from datetime import datetime, timezone, timedelta
+
+    # Only use markets resolved in the last 60 days so Google News can
+    # find relevant headlines (older markets get unrelated current news).
+    cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+    cutoff_str = cutoff.strftime("%Y-%m-%d")
+
+    items: list[dict] = []
+    page_size = 500
+    for offset in range(0, page_size * 3, page_size):
+        try:
+            resp = httpx.get(
+                f"{GAMMA_API}/markets",
+                params={
+                    "limit": page_size,
+                    "offset": offset,
+                    "active": "false",
+                    "closed": "true",
+                    "end_date_min": cutoff_str,   # recently resolved only
+                },
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            console.print(f"[red]Error fetching resolved markets (offset {offset}): {e}[/red]")
+            break
+
+        page = data if isinstance(data, list) else data.get("data", [])
+        if not page:
+            break
+
+        # Client-side date guard in case the API ignores end_date_min
+        filtered_page = []
+        for m in page:
+            end_date = m.get("endDate") or m.get("end_date_iso") or ""
+            if end_date[:10] >= cutoff_str:
+                filtered_page.append(m)
+
+        items.extend(filtered_page)
+        if len(page) < page_size:
+            break  # last page
 
     markets = []
     for m in items:
         try:
-            import json
             outcome_prices = m.get("outcomePrices", "")
             if isinstance(outcome_prices, str):
-                prices = json.loads(outcome_prices)
+                prices = _json.loads(outcome_prices)
             else:
                 prices = outcome_prices
 
@@ -87,6 +182,9 @@ def fetch_resolved_markets(limit: int = 50, category: str | None = None) -> list
                 continue
 
             question = m.get("question", "")
+            if not question:
+                continue
+
             if category:
                 from markets import _infer_category
                 cat = _infer_category(question, m.get("tags") or [])
@@ -96,11 +194,15 @@ def fetch_resolved_markets(limit: int = 50, category: str | None = None) -> list
             markets.append({
                 "question": question,
                 "condition_id": m.get("conditionId", m.get("condition_id", "")),
-                "yes_price_at_open": 0.5,  # approximation
+                "yes_price_at_open": 0.5,
                 "resolved_yes_price": float(prices[0]),
                 "volume": vol,
                 "category": m.get("tags", []),
             })
+
+            if len(markets) >= limit:
+                break
+
         except (ValueError, TypeError, KeyError):
             continue
 
@@ -113,9 +215,30 @@ def run_backtest(
     test_headlines: list[str] | None = None,
 ) -> BacktestReport:
     """
-    Run a backtest against resolved markets.
-    Uses mock headlines derived from market questions if none provided.
+    Headline sanity check against resolved markets.
+
+    IMPORTANT LIMITATIONS — do NOT use win rate here as a trading signal:
+
+    1. Look-ahead bias: news is fetched TODAY by keyword from Google News /
+       NewsAPI, with no date filter anchored to the market's resolution date.
+       Some headlines may have been published AFTER the market resolved.
+
+    2. Selection bias: markets with no findable news are silently skipped,
+       which skews the sample toward well-covered, easier-to-classify events.
+
+    3. Entry price is approximated at 0.5 (midpoint) because Polymarket does
+       not expose historical intraday prices via the public API.
+
+    This function is useful for verifying that the classifier produces
+    directional signals on real text. It is NOT a reliable estimate of
+    live trading win rate or expected return.
     """
+    console.print(
+        "[bold yellow]⚠  HEADLINE SANITY CHECK — NOT A TRUE BACKTEST[/bold yellow]\n"
+        "   News is fetched today without date anchoring → look-ahead bias.\n"
+        "   Markets without findable news are skipped → selection bias.\n"
+        "   Win rate shown here is NOT a reliable trading signal.\n"
+    )
     console.print("[bold]Fetching resolved niche markets...[/bold]")
     resolved = fetch_resolved_markets(limit=limit, category=category)
     console.print(f"Found {len(resolved)} resolved niche markets")
@@ -132,6 +255,7 @@ def run_backtest(
             results=[],
         )
 
+    newsapi_key = config.NEWSAPI_KEY
     results = []
     signals = 0
     total_pnl = 0.0
@@ -140,8 +264,8 @@ def run_backtest(
         question = m_data["question"]
         resolved_price = m_data["resolved_yes_price"]
 
-        # Create a Market object for the classifier
-        entry_price = 0.5  # assume we entered at midpoint (conservative)
+        # Entry price: use mid-point as conservative assumption
+        entry_price = 0.5
         market = Market(
             condition_id=m_data["condition_id"],
             question=question,
@@ -154,16 +278,34 @@ def run_backtest(
             tokens=[],
         )
 
-        # Generate a synthetic headline from the question
-        # In production, you'd replay actual historical news
-        headline = f"Breaking: Developments suggest '{question}' outcome shifting"
+        # Use caller-supplied headlines OR fetch real ones from Google News / NewsAPI
         if test_headlines and i < len(test_headlines):
-            headline = test_headlines[i]
+            headlines_for_market = [test_headlines[i]]
+        else:
+            console.print(f"  [{i + 1}/{len(resolved)}] Fetching news for: {question[:55]}...", end="\r")
+            headlines_for_market = fetch_real_news_for_market(question, newsapi_key)
+
+        if not headlines_for_market:
+            # No news found — skip this market (can't make a real classification)
+            continue
+
+        # Classify headlines in order; use the FIRST non-neutral signal.
+        # This mirrors real pipeline behaviour: the first relevant news event
+        # triggers the trade. Cherry-picking the strongest signal would
+        # overstate classifier quality.
+        cls = None
+        headline = ""
+        for candidate in headlines_for_market:
+            result = classify(candidate, market, source="backtest")
+            if result.direction != "neutral":
+                cls = result
+                headline = candidate
+                break
+
+        if cls is None:
+            continue  # all headlines neutral for this market
 
         console.print(f"  [{i + 1}/{len(resolved)}] {question[:60]}...", end="\r")
-
-        # Classify
-        cls = classify(headline, market, source="backtest")
 
         if cls.direction == "neutral" or cls.materiality < config.MATERIALITY_THRESHOLD:
             continue

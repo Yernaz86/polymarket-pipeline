@@ -351,6 +351,14 @@ def cmd_trades(args):
     console.print(table)
 
 
+def cmd_web(args):
+    """Launch the web dashboard."""
+    from web import run
+    console.print(f"[bright_green]Web dashboard starting at http://localhost:{args.port}[/bright_green]")
+    console.print("[dim]Press Ctrl+C to stop[/dim]")
+    run(host="0.0.0.0", port=args.port)
+
+
 def cmd_stats(args):
     import logger
 
@@ -436,6 +444,11 @@ def main():
     # stats
     p_stats = sub.add_parser("stats", help="Performance statistics")
     p_stats.set_defaults(func=cmd_stats)
+
+    # web
+    p_web = sub.add_parser("web", help="Launch web dashboard (http://localhost:8000)")
+    p_web.add_argument("--port", type=int, default=8000, help="Port to listen on")
+    p_web.set_defaults(func=cmd_web)
 
     args = parser.parse_args()
     if not args.command:
